@@ -1,0 +1,39 @@
+### Test GET /health
+GET http://localhost:5050/health
+
+### Test POST /master/provision
+POST http://localhost:5050/master/provision
+Content-Type: application/json
+
+{
+  "nodeName": "my-k3s-master",
+  "nodeUid": "1234567890abcdef",
+  "nodeType": "master",
+  "token": "3db0cffabd51e64c618fe307eb3e03e",
+  "masterIP": "",
+  "cpus": 2,
+  "diskSize": "3GB",
+  "memory": "1GB",
+  "imageOci": "shajalahamedcse/only-k3-go:v1.0.10",
+  "enableSsh": true
+}
+
+### Test DELETE /master/vm/:name
+DELETE http://localhost:5050/master/vm/my-k3s-worker-1
+
+### Test POST /worker/provision
+POST http://localhost:5050/worker/provision
+Content-Type: application/json
+
+{
+  "nodeName": "my-k3s-worker-1",
+  "nodeUid": "1234567890abcdef",
+  "nodeType": "worker",
+  "token": "3db0cffabd51e64c618fe307eb3e03e",
+  "masterIP": "10.62.19.227",
+  "cpus": 2,
+  "diskSize": "3GB",
+  "memory": "1GB",
+  "imageOci": "shajalahamedcse/only-k3-go:v1.0.10",
+  "enableSsh": true
+}
