@@ -2,13 +2,27 @@ package main
 
 import (
 	"ignite-api/internal/api"
-	"log"
+	"ignite-api/internal/logger"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/requestid"
 )
 
 func main() {
 	app := fiber.New()
+
+	// Add request ID middleware
+	app.Use(requestid.New())
+
+	// Add request logging middleware
+	app.Use(func(c *fiber.Ctx) error {
+		start := time.Now()
+		err := c.Next()
+		duration := time.Since(start)
+		logger.RequestLog(c.Method(), c.Path(), c.IP(), duration)
+		return err
+	})
 
 	// Define API endpoints
 	app.Get("/health", api.HealthHandler)
@@ -18,8 +32,8 @@ func main() {
 
 	// Start server
 	port := "5090"
-	log.Printf("Starting Ignite API server on port %s...\n", port)
+	logger.Info("Starting Ignite API server on port %s...", port)
 	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("Failed to start server: %v\n", err)
+		logger.Fatal("Failed to start server: %v", err)
 	}
 }

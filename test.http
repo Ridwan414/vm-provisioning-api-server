@@ -36,4 +36,4 @@ Content-Type: application/json
 }
 
 ### Test DELETE /vm/:name
-DELETE http://localhost:5090/master/vm/my-k3s-worker-3
+DELETE http://localhost:5090/vm/my-k3s-master

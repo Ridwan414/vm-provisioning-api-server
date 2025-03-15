@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"ignite-api/internal/config"
+	"ignite-api/internal/logger"
 	"log"
 	"os"
 	"os/exec"
@@ -90,9 +91,12 @@ func RunIgnite(manifestFileName, nodeName string) error {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	log.Printf("Provisioning VM: %s\n", nodeName)
+	logger.Info("Provisioning VM: %s", nodeName)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Error running ignite: %v\nStdout: %s\nStderr: %s", err, stdout.String(), stderr.String())
+		logger.Error("Failed to run ignite: %v\nStdout: %s\nStderr: %s",
+			err, stdout.String(), stderr.String())
+		return fmt.Errorf("Error running ignite: %v\nStdout: %s\nStderr: %s",
+			err, stdout.String(), stderr.String())
 	}
 	return nil
 }

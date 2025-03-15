@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"ignite-api/internal/config"
+	"ignite-api/internal/logger"
 	"ignite-api/internal/models"
 	"ignite-api/internal/utils"
 	"log"
@@ -24,17 +25,17 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		request := new(models.ProvisionRequest)
 		if err := c.BodyParser(request); err != nil {
-			log.Printf("Invalid request format: %v\n", err)
+			logger.Error("Invalid request format: %v", err)
 			return c.Status(400).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   "Invalid request format: " + err.Error(),
 			})
 		}
 
-		log.Printf("Received %s provision request: %+v\n", nodeType, request)
+		logger.Info("Received %s provision request for node: %s", nodeType, request.NodeName)
 
 		if err := validateProvisionRequest(request, nodeType); err != nil {
-			log.Printf("%v\n", err)
+			logger.Warn("Validation failed: %v", err)
 			return c.Status(400).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   err.Error(),
@@ -46,7 +47,7 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 
 		configFileName, err := utils.CreateTempConfigFile(cfg)
 		if err != nil {
-			log.Printf("%v\n", err)
+			logger.Error("Failed to create config file: %v", err)
 			return c.Status(500).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   err.Error(),
@@ -66,7 +67,7 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 
 		manifestFileName, err := utils.CreateTempManifestFile(manifest)
 		if err != nil {
-			log.Printf("%v\n", err)
+			logger.Error("Failed to create manifest file: %v", err)
 			return c.Status(500).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   err.Error(),
@@ -75,7 +76,7 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 		defer os.Remove(manifestFileName)
 
 		if err := utils.RunIgnite(manifestFileName, request.NodeName); err != nil {
-			log.Printf("%v\n", err)
+			logger.Error("Failed to run Ignite: %v", err)
 			return c.Status(500).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   err.Error(),
@@ -84,7 +85,7 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 
 		masterIP, err := utils.GetMasterIP(request.NodeName)
 		if err != nil {
-			log.Printf("Failed to get master IP: %v\n", err)
+			logger.Error("Failed to get master IP: %v", err)
 			return c.Status(500).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   "Failed to get master IP: " + err.Error(),
@@ -92,14 +93,14 @@ func ProvisionHandler(nodeType string) fiber.Handler {
 		}
 
 		if err := utils.StoreProvisionInfo(request.NodeName, request.NodeUID, masterIP, request.NodeType, request.Token); err != nil {
-			log.Printf("Failed to store provision info: %v\n", err)
+			logger.Error("Failed to store provision info: %v", err)
 			return c.Status(500).JSON(models.ProvisionResponse{
 				Success: false,
 				Error:   "Failed to store provision info: " + err.Error(),
 			})
 		}
 
-		log.Printf("VM '%s' successfully provisioned with IP %s\n", request.NodeName, masterIP)
+		logger.Info("VM '%s' successfully provisioned with IP %s", request.NodeName, masterIP)
 		return c.JSON(models.ProvisionResponse{
 			Success:  true,
 			Message:  fmt.Sprintf("VM '%s' successfully provisioned", request.NodeName),
