@@ -1,8 +1,8 @@
 ### Test GET /health
-GET http://localhost:5050/health
+GET http://localhost:5090/health
 
 ### Test POST /master/provision
-POST http://localhost:5050/master/provision
+POST http://localhost:5090/master/provision
 Content-Type: application/json
 
 {
@@ -18,22 +18,22 @@ Content-Type: application/json
   "enableSsh": true
 }
 
-### Test DELETE /master/vm/:name
-DELETE http://localhost:5050/master/vm/my-k3s-worker-1
-
 ### Test POST /worker/provision
-POST http://localhost:5050/worker/provision
+POST http://localhost:5090/worker/provision
 Content-Type: application/json
 
 {
-  "nodeName": "my-k3s-worker-1",
-  "nodeUid": "1234567890abcdef",
+  "nodeName": "my-k3s-worker-2",
+  "nodeUid": "1234567890abcdek",
   "nodeType": "worker",
   "token": "3db0cffabd51e64c618fe307eb3e03e",
-  "masterIP": "10.62.19.227",
+  "masterIP": "10.62.0.191",
   "cpus": 2,
   "diskSize": "3GB",
   "memory": "1GB",
   "imageOci": "shajalahamedcse/only-k3-go:v1.0.10",
   "enableSsh": true
 }
+
+### Test DELETE /vm/:name
+DELETE http://localhost:5090/master/vm/my-k3s-worker-3
