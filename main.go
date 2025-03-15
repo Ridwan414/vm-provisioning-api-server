@@ -71,12 +71,12 @@ func main() {
 
 	// Define API endpoints
 	app.Get("/health", healthHandler)
-	app.Post("/master/provision", masterProvisionHandler)
-	app.Post("/worker/provision", workerProvisionHandler)
-	app.Delete("/master/vm/:name", deleteVMHandler)
+	app.Post("/master/provision", provisionHandler("master"))
+	app.Post("/worker/provision", provisionHandler("worker"))
+	app.Delete("/vm/:name", deleteVMHandler)
 
 	// Start server
-	port := "5050"
+	port := "5090"
 	log.Printf("Starting Ignite API server on port %s...\n", port)
 	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v\n", err)
@@ -146,40 +146,133 @@ func storeProvisionInfo(nodeName, nodeUID, masterIP, nodeType, token string) err
 	return nil
 }
 
-// masterProvisionHandler handles the provision request for master nodes
-func masterProvisionHandler(c *fiber.Ctx) error {
-	// Parse request body
-	request := new(ProvisionRequest)
-	if err := c.BodyParser(request); err != nil {
-		log.Printf("Invalid request format: %v\n", err)
-		return c.Status(400).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Invalid request format: " + err.Error(),
+// provisionHandler handles the provision request for nodes
+func provisionHandler(nodeType string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Parse request body
+		request := new(ProvisionRequest)
+		if err := c.BodyParser(request); err != nil {
+			log.Printf("Invalid request format: %v\n", err)
+			return c.Status(400).JSON(ProvisionResponse{
+				Success: false,
+				Error:   "Invalid request format: " + err.Error(),
+			})
+		}
+
+		// Log the request body for debugging
+		log.Printf("Received %s provision request: %+v\n", nodeType, request)
+
+		// Validate required fields
+		if err := validateProvisionRequest(request, nodeType); err != nil {
+			log.Printf("%v\n", err)
+			return c.Status(400).JSON(ProvisionResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+		}
+
+		// Create config and manifest data in memory
+		config := createConfig(request)
+		manifest := createManifest(request)
+
+		// Create config.json as a copyFile entry (using temp file)
+		configFileName, err := createTempConfigFile(config)
+		if err != nil {
+			log.Printf("%v\n", err)
+			return c.Status(500).JSON(ProvisionResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+		}
+		defer os.Remove(configFileName)
+
+		manifest.Spec.CopyFiles = []struct {
+			HostPath string `yaml:"hostPath"`
+			VMPath   string `yaml:"vmPath"`
+		}{
+			{
+				HostPath: configFileName,
+				VMPath:   "/root/config.json",
+			},
+		}
+
+		// Convert manifest to YAML
+		manifestFileName, err := createTempManifestFile(manifest)
+		if err != nil {
+			log.Printf("%v\n", err)
+			return c.Status(500).JSON(ProvisionResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+		}
+		defer os.Remove(manifestFileName)
+
+		// Execute ignite using the temporary file
+		if err := runIgnite(manifestFileName, request.NodeName); err != nil {
+			log.Printf("%v\n", err)
+			return c.Status(500).JSON(ProvisionResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+		}
+
+		// Get the master IP by running `ignite ps`
+		masterIP, err := getMasterIP(request.NodeName)
+		if err != nil {
+			log.Printf("Failed to get master IP: %v\n", err)
+			return c.Status(500).JSON(ProvisionResponse{
+				Success: false,
+				Error:   "Failed to get master IP: " + err.Error(),
+			})
+		}
+
+		// Store provisioned VM info in CSV
+		if err := storeProvisionInfo(request.NodeName, request.NodeUID, masterIP, request.NodeType, request.Token); err != nil {
+			log.Printf("Failed to store provision info: %v\n", err)
+			return c.Status(500).JSON(ProvisionResponse{
+				Success: false,
+				Error:   "Failed to store provision info: " + err.Error(),
+			})
+		}
+
+		// Return success response
+		log.Printf("VM '%s' successfully provisioned with IP %s\n", request.NodeName, masterIP)
+		return c.JSON(ProvisionResponse{
+			Success:  true,
+			Message:  fmt.Sprintf("VM '%s' successfully provisioned", request.NodeName),
+			NodeID:   request.NodeUID,
+			MasterIP: masterIP,
 		})
 	}
+}
 
-	// Log the request body for debugging
-	log.Printf("Received provision request: %+v\n", request)
-
-	// Validate required fields
+// validateProvisionRequest validates the provision request based on node type
+func validateProvisionRequest(request *ProvisionRequest, nodeType string) error {
 	if request.NodeName == "" || request.NodeUID == "" {
-		log.Printf("NodeName and NodeUID are required fields\n")
-		return c.Status(400).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "NodeName and NodeUID are required fields",
-		})
+		return fmt.Errorf("NodeName and NodeUID are required fields")
 	}
+	if nodeType == "worker" && (request.MasterIP == "" || request.NodeType != "worker") {
+		return fmt.Errorf("NodeName, NodeUID, MasterIP, and NodeType 'worker' are required fields")
+	}
+	if nodeType == "worker" && !validateTokenAndMasterIP(request.Token, request.MasterIP) {
+		return fmt.Errorf("Token and MasterIP do not match any existing records")
+	}
+	return nil
+}
 
-	// Create config data in memory
-	config := Config{
+// createConfig creates a Config object from the provision request
+func createConfig(request *ProvisionRequest) Config {
+	return Config{
 		Name:     request.NodeName,
 		UID:      request.NodeUID,
 		NodeType: request.NodeType,
 		Token:    request.Token,
 		MasterIP: request.MasterIP,
 	}
+}
 
-	// Create manifest data in memory
+// createManifest creates a Manifest object from the provision request
+func createManifest(request *ProvisionRequest) Manifest {
 	manifest := Manifest{
 		APIVersion: "ignite.weave.works/v1alpha4",
 		Kind:       "VM",
@@ -214,100 +307,39 @@ func masterProvisionHandler(c *fiber.Ctx) error {
 	manifest.Spec.Memory = memory
 	manifest.Spec.SSH = request.EnableSSH
 
-	// Create config.json as a copyFile entry (using temp file)
+	return manifest
+}
+
+// createTempConfigFile creates a temporary config file from the Config object
+func createTempConfigFile(config Config) (string, error) {
 	configContent, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		log.Printf("Failed to marshal config: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Failed to marshal config: " + err.Error(),
-		})
+		return "", fmt.Errorf("Failed to marshal config: %w", err)
 	}
+	return writeTempFile(configContent, "config-*.json")
+}
 
-	configFileName, err := writeTempFile(configContent, "config-*.json")
-	if err != nil {
-		log.Printf("%v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-	defer os.Remove(configFileName)
-
-	manifest.Spec.CopyFiles = []struct {
-		HostPath string `yaml:"hostPath"`
-		VMPath   string `yaml:"vmPath"`
-	}{
-		{
-			HostPath: configFileName,
-			VMPath:   "/root/config.json",
-		},
-	}
-
-	// Convert manifest to YAML
+// createTempManifestFile creates a temporary manifest file from the Manifest object
+func createTempManifestFile(manifest Manifest) (string, error) {
 	manifestYAML, err := yaml.Marshal(manifest)
 	if err != nil {
-		log.Printf("Error marshaling manifest: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Error marshaling manifest: " + err.Error(),
-		})
+		return "", fmt.Errorf("Error marshaling manifest: %w", err)
 	}
+	return writeTempFile(manifestYAML, "ignite-config-*.yaml")
+}
 
-	manifestFileName, err := writeTempFile(manifestYAML, "ignite-config-*.yaml")
-	if err != nil {
-		log.Printf("%v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-	defer os.Remove(manifestFileName)
-
-	// Execute ignite using the temporary file
+// runIgnite executes the ignite command with the given manifest file
+func runIgnite(manifestFileName, nodeName string) error {
 	cmd := exec.Command("sudo", "ignite", "run", "--config", manifestFileName)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	log.Printf("Provisioning VM: %s\n", request.NodeName)
+	log.Printf("Provisioning VM: %s\n", nodeName)
 	if err := cmd.Run(); err != nil {
-		errMsg := fmt.Sprint("Error running ignite: ", err, "\nStdout: ", stdout.String(), "\nStderr: ", stderr.String())
-		log.Print(errMsg)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   errMsg,
-		})
+		return fmt.Errorf("Error running ignite: %v\nStdout: %s\nStderr: %s", err, stdout.String(), stderr.String())
 	}
-
-	// Get the master IP by running `ignite ps`
-	masterIP, err := getMasterIP(request.NodeName)
-	if err != nil {
-		log.Printf("Failed to get master IP: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Failed to get master IP: " + err.Error(),
-		})
-	}
-
-	// Return success response
-	log.Printf("VM '%s' successfully provisioned with IP %s\n", request.NodeName, masterIP)
-
-	// Store provisioned VM info in CSV
-	if err := storeProvisionInfo(request.NodeName, request.NodeUID, masterIP, request.NodeType, request.Token); err != nil {
-		log.Printf("Failed to store provision info: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Failed to store provision info: " + err.Error(),
-		})
-	}
-
-	return c.JSON(ProvisionResponse{
-		Success:  true,
-		Message:  fmt.Sprintf("VM '%s' successfully provisioned", request.NodeName),
-		NodeID:   request.NodeUID,
-		MasterIP: masterIP,
-	})
+	return nil
 }
 
 // getMasterIP executes `ignite ps` and parses the output to find the IP of the master node
@@ -327,9 +359,6 @@ func getMasterIP(nodeName string) (string, error) {
 		if bytes.Contains(line, []byte(nodeName)) {
 			// Assuming the IP is the 8th column in the output
 			fields := bytes.Fields(line)
-			// for i, field := range fields {
-			// 	log.Printf("Field %d: %s\n", i, string(field))
-			// }
 			if len(fields) >= 12 {
 				return string(fields[12]), nil
 			}
@@ -350,8 +379,7 @@ func deleteVMHandler(c *fiber.Ctx) error {
 	}
 
 	// Stop the VM
-	stopCmd := exec.Command("sudo", "ignite", "vm", "stop", vmName)
-	if err := stopCmd.Run(); err != nil {
+	if err := runIgniteCommand("stop", vmName); err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Failed to stop VM: %v", err),
@@ -359,8 +387,7 @@ func deleteVMHandler(c *fiber.Ctx) error {
 	}
 
 	// Remove the VM
-	rmCmd := exec.Command("sudo", "ignite", "vm", "rm", vmName)
-	if err := rmCmd.Run(); err != nil {
+	if err := runIgniteCommand("rm", vmName); err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Failed to remove VM: %v", err),
@@ -373,157 +400,13 @@ func deleteVMHandler(c *fiber.Ctx) error {
 	})
 }
 
-// workerProvisionHandler handles the provision request for worker nodes
-func workerProvisionHandler(c *fiber.Ctx) error {
-	// Parse request body
-	request := new(ProvisionRequest)
-	if err := c.BodyParser(request); err != nil {
-		log.Printf("Invalid request format: %v\n", err)
-		return c.Status(400).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Invalid request format: " + err.Error(),
-		})
-	}
-
-	// Log the request body for debugging
-	log.Printf("Received worker provision request: %+v\n", request)
-
-	// Validate required fields
-	if request.NodeName == "" || request.NodeUID == "" || request.MasterIP == "" || request.NodeType != "worker" {
-		log.Printf("NodeName, NodeUID, MasterIP, and NodeType 'worker' are required fields\n")
-		return c.Status(400).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "NodeName, NodeUID, MasterIP, and NodeType 'worker' are required fields",
-		})
-	}
-
-	// Check if the token and master IP match from the CSV
-	if !validateTokenAndMasterIP(request.Token, request.MasterIP) {
-		log.Printf("Token and MasterIP do not match any existing records\n")
-		return c.Status(400).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Token and MasterIP do not match any existing records",
-		})
-	}
-
-	// Create config data in memory
-	config := Config{
-		Name:     request.NodeName,
-		UID:      request.NodeUID,
-		NodeType: request.NodeType,
-		Token:    request.Token,
-		MasterIP: request.MasterIP,
-	}
-
-	// Create manifest data in memory
-	manifest := Manifest{
-		APIVersion: "ignite.weave.works/v1alpha4",
-		Kind:       "VM",
-	}
-	manifest.Metadata.Name = request.NodeName
-	manifest.Metadata.UID = request.NodeUID
-
-	// Set defaults if not provided
-	cpus := request.CPUs
-	if cpus <= 0 {
-		cpus = 2
-	}
-	diskSize := request.DiskSize
-	if diskSize == "" {
-		diskSize = "3GB"
-	}
-	memory := request.Memory
-	if memory == "" {
-		memory = "1GB"
-	}
-	imageOCI := request.ImageOCI
-	if imageOCI == "" {
-		imageOCI = "shajalahamedcse/only-k3-go:v1.0.10"
-	}
-
-	// Log the imageOCI value for debugging
-	log.Printf("Using image OCI: %s\n", imageOCI)
-
-	manifest.Spec.Image = map[string]string{"oci": imageOCI}
-	manifest.Spec.CPUs = cpus
-	manifest.Spec.DiskSize = diskSize
-	manifest.Spec.Memory = memory
-	manifest.Spec.SSH = request.EnableSSH
-
-	// Create config.json as a copyFile entry (using temp file)
-	configContent, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		log.Printf("Failed to marshal config: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Failed to marshal config: " + err.Error(),
-		})
-	}
-
-	configFileName, err := writeTempFile(configContent, "config-*.json")
-	if err != nil {
-		log.Printf("%v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-	defer os.Remove(configFileName)
-
-	manifest.Spec.CopyFiles = []struct {
-		HostPath string `yaml:"hostPath"`
-		VMPath   string `yaml:"vmPath"`
-	}{
-		{
-			HostPath: configFileName,
-			VMPath:   "/root/config.json",
-		},
-	}
-
-	// Convert manifest to YAML
-	manifestYAML, err := yaml.Marshal(manifest)
-	if err != nil {
-		log.Printf("Error marshaling manifest: %v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   "Error marshaling manifest: " + err.Error(),
-		})
-	}
-
-	manifestFileName, err := writeTempFile(manifestYAML, "ignite-config-*.yaml")
-	if err != nil {
-		log.Printf("%v\n", err)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-	defer os.Remove(manifestFileName)
-
-	// Execute ignite using the temporary file
-	cmd := exec.Command("sudo", "ignite", "run", "--config", manifestFileName)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	log.Printf("Provisioning worker VM: %s\n", request.NodeName)
+// runIgniteCommand runs an ignite command with the given action and VM name
+func runIgniteCommand(action, vmName string) error {
+	cmd := exec.Command("sudo", "ignite", "vm", action, vmName)
 	if err := cmd.Run(); err != nil {
-		errMsg := fmt.Sprint("Error running ignite: ", err, "\nStdout: ", stdout.String(), "\nStderr: ", stderr.String())
-		log.Print(errMsg)
-		return c.Status(500).JSON(ProvisionResponse{
-			Success: false,
-			Error:   errMsg,
-		})
+		return fmt.Errorf("Failed to %s VM: %v", action, err)
 	}
-
-	// Return success response
-	log.Printf("Worker VM '%s' successfully provisioned\n", request.NodeName)
-
-	return c.JSON(ProvisionResponse{
-		Success: true,
-		Message: fmt.Sprintf("Worker VM '%s' successfully provisioned", request.NodeName),
-		NodeID:  request.NodeUID,
-	})
+	return nil
 }
 
 // validateTokenAndMasterIP checks if the token and master IP match any existing records in the CSV
@@ -544,8 +427,8 @@ func validateTokenAndMasterIP(token, masterIP string) bool {
 
 	for _, record := range records {
 		if len(record) >= 3 && record[2] == masterIP {
-			// Assuming the token is stored in the 4th column
-			if len(record) >= 4 && record[3] == token {
+			// Assuming the token is stored in the 5th column
+			if len(record) >= 5 && record[4] == token {
 				return true
 			}
 		}
